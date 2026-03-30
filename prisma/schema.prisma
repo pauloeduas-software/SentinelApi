@@ -1,0 +1,38 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Asset {
+  id          String      @id @default(uuid()) @db.Uuid
+  hwid        String      @unique
+  hostname    String
+  osVersion   String
+  status      String      @default("ONLINE")
+  lastSeen    DateTime    @default(now())
+  telemetries Telemetry[]
+
+  @@map("assets")
+}
+
+model Telemetry {
+  id         String   @id @default(uuid()) @db.Uuid
+  assetId    String   @db.Uuid
+  cpuUsage   Float
+  ramTotal   BigInt
+  ramUsed    BigInt
+  disks      Json?
+  timestamp  DateTime @default(now())
+  
+  // Relacionamento com o Asset
+  asset      Asset    @relation(fields: [assetId], references: [id], onDelete: Cascade)
+
+  @@map("telemetries")
+}

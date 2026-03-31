@@ -6,6 +6,9 @@ import { PrismaClient } from '@prisma/client';
 const prisma = new PrismaClient();
 const server = Fastify({ logger: false });
 
+// Mapa global para gerenciar conexões ativas (HWID -> Socket)
+const activeAgents = new Map<string, any>();
+
 // Hack global para serializar BigInt corretamente
 (BigInt.prototype as any).toJSON = function () {
   return this.toString();
@@ -19,10 +22,9 @@ async function startServer() {
   await server.register(cors, { origin: '*' });
   await server.register(websocket);
 
-  // 2. ROTA API: Listagem de Ativos para o Dashboard
+  // 2. ROTA API: Listagem de Ativos
   server.get('/api/assets', async () => {
-    // Busca todos os assets incluindo apenas a telemetria mais recente de cada um
-    const assets = await prisma.asset.findMany({
+    return await prisma.asset.findMany({
       include: {
         telemetries: {
           orderBy: { timestamp: 'desc' },
@@ -30,13 +32,39 @@ async function startServer() {
         }
       }
     });
-
-    return assets;
   });
 
-  // 3. ROTA WS: Ingestão de Dados dos Agentes
+  // 3. ROTA API: Disparo de Comandos Remotos
+  server.post('/api/assets/:hwid/command', async (request, reply) => {
+    const { hwid } = request.params as { hwid: string };
+    const { action } = request.body as { action: string };
+
+    const socket = activeAgents.get(hwid);
+
+    if (!socket) {
+      return reply.status(404).send({ error: "Agente offline ou não encontrado." });
+    }
+
+    // Envelopa o comando para o Agente C#
+    const commandPacket = JSON.stringify({
+      Type: "Command",
+      Payload: {
+        Action: action,
+        CommandId: crypto.randomUUID()
+      }
+    });
+
+    socket.send(commandPacket);
+    console.log(`[COMANDO]: ${action} enviado para o Agente ${hwid.substring(0, 8)}`);
+
+    return { message: "Comando enviado com sucesso." };
+  });
+
+  // 4. ROTA WS: Ingestão e Controle
   server.get('/agent-hub', { websocket: true }, (socket, req) => {
     const clientId = req.socket.remoteAddress || 'Unknown';
+    let currentHwid: string | null = null;
+
     console.log(`\n[WS]: Agente Conectado em /agent-hub [${clientId}]`);
 
     socket.on('message', async (data: any) => {
@@ -44,10 +72,12 @@ async function startServer() {
         const message = JSON.parse(data.toString());
         const { Type, Payload } = message;
 
-        const logHwid = Payload?.Hwid || Payload?.hwid || 'Desconhecido';
-        console.log(`[RECEBIDO]: Tipo: ${Type} | HWID: ${logHwid.substring(0, 8)}`);
+        const hwid = Payload?.Hwid || Payload?.hwid;
+        const logHwid = hwid || 'Desconhecido';
 
-        if (Type === 'Handshake') {
+        if (Type === 'Handshake' && hwid) {
+          currentHwid = hwid;
+          activeAgents.set(hwid, socket); // Registra no pool ativo
           await handleHandshake(Payload);
         } else if (Type === 'Telemetry') {
           await handleTelemetry(Payload);
@@ -58,14 +88,16 @@ async function startServer() {
     });
 
     socket.on('close', () => {
-      console.log(`[WS]: Agente Desconectado [${clientId}]`);
+      if (currentHwid) {
+        activeAgents.delete(currentHwid); // Remove do pool ativo
+        console.log(`[WS]: Agente ${currentHwid.substring(0, 8)} desconectado e removido do pool.`);
+      }
     });
   });
 
-  // 4. Start do Servidor
   try {
     await server.listen({ port: 5000, host: '0.0.0.0' });
-    console.log('🚀 Sentinel API Rodando em http://localhost:5000/agent-hub');
+    console.log('🚀 Sentinel API Rodando em http://localhost:5000');
   } catch (err) {
     console.error(err);
     process.exit(1);
@@ -73,18 +105,26 @@ async function startServer() {
 }
 
 /**
- * Persistência: Handshake (Upsert)
+ * Persistência: Handshake
  */
 async function handleHandshake(payload: any) {
   const hwid = payload.Hwid || payload.hwid;
   const hostname = payload.Hostname || payload.hostname;
   const osVersion = payload.OsVersion || payload.osVersion;
+  const macAddress = payload.MacAddress || payload.macAddress;
+  const localIp = payload.LocalIp || payload.localIp;
+  const cpuModel = payload.CpuModel || payload.cpuModel;
+  const installedSoftware = payload.InstalledSoftware || payload.installedSoftware;
 
-  const asset = await prisma.asset.upsert({
+  await prisma.asset.upsert({
     where: { hwid },
     update: {
       hostname,
       osVersion,
+      macAddress,
+      localIp,
+      cpuModel,
+      installedSoftware,
       status: 'ONLINE',
       lastSeen: new Date(),
     },
@@ -92,15 +132,19 @@ async function handleHandshake(payload: any) {
       hwid,
       hostname,
       osVersion,
+      macAddress,
+      localIp,
+      cpuModel,
+      installedSoftware,
       status: 'ONLINE',
     },
   });
 
-  console.log(`[BD]: Handshake Concluído. Ativo ID: ${asset.id}`);
+  console.log(`[BD]: Handshake Concluído para ${hwid.substring(0, 8)}`);
 }
 
 /**
- * Persistência: Telemetry (Create)
+ * Persistência: Telemetry
  */
 async function handleTelemetry(payload: any) {
   const hwid = payload.Hwid || payload.hwid;
@@ -109,11 +153,7 @@ async function handleTelemetry(payload: any) {
   const ramUsed = payload.RamUsedBytes || payload.ramUsedBytes;
   const disks = payload.DiskUsageBytes || payload.diskUsageBytes || payload.Disks || payload.disks || {};
 
-  const asset = await prisma.asset.findUnique({
-    where: { hwid },
-    select: { id: true },
-  });
-
+  const asset = await prisma.asset.findUnique({ where: { hwid }, select: { id: true } });
   if (!asset) return;
 
   await prisma.telemetry.create({
@@ -125,8 +165,6 @@ async function handleTelemetry(payload: any) {
       disks: disks,
     },
   });
-
-  console.log(`[BD]: Telemetria Gravada para ${hwid.substring(0, 8)}`);
 }
 
 startServer();

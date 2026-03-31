@@ -11,13 +11,17 @@ datasource db {
 }
 
 model Asset {
-  id          String      @id @default(uuid()) @db.Uuid
-  hwid        String      @unique
-  hostname    String
-  osVersion   String
-  status      String      @default("ONLINE")
-  lastSeen    DateTime    @default(now())
-  telemetries Telemetry[]
+  id                String      @id @default(uuid()) @db.Uuid
+  hwid              String      @unique
+  hostname          String
+  osVersion         String
+  macAddress        String?
+  localIp           String?
+  cpuModel          String?
+  installedSoftware Json?
+  status            String      @default("ONLINE")
+  lastSeen          DateTime    @default(now())
+  telemetries       Telemetry[]
 
   @@map("assets")
 }

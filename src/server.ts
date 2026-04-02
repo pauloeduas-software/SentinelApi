@@ -87,10 +87,22 @@ async function startServer() {
       }
     });
 
-    socket.on('close', () => {
+    socket.on('close', async () => {
       if (currentHwid) {
         activeAgents.delete(currentHwid); // Remove do pool ativo
-        console.log(`[WS]: Agente ${currentHwid.substring(0, 8)} desconectado e removido do pool.`);
+        
+        try {
+          await prisma.asset.update({
+            where: { hwid: currentHwid },
+            data: { 
+              status: 'OFFLINE',
+              lastSeen: new Date()
+            }
+          });
+          console.log(`[WS]: Agente ${currentHwid.substring(0, 8)} desconectado e marcado como OFFLINE no BD.`);
+        } catch (err) {
+          console.error(`[ERRO]: Falha ao atualizar status OFFLINE para ${currentHwid}:`, err);
+        }
       }
     });
   });
@@ -98,6 +110,26 @@ async function startServer() {
   try {
     await server.listen({ port: 5000, host: '0.0.0.0' });
     console.log('🚀 Sentinel API Rodando em http://localhost:5000');
+
+    // TESTE 4: Heartbeat / Zombie Cleaner (Roda a cada 60s)
+    setInterval(async () => {
+      const timeoutLimit = new Date(Date.now() - 2 * 60 * 1000); // 2 minutos
+      try {
+        const expired = await prisma.asset.updateMany({
+          where: {
+            status: 'ONLINE',
+            lastSeen: { lt: timeoutLimit }
+          },
+          data: { status: 'OFFLINE' }
+        });
+        if (expired.count > 0) {
+          console.log(`[LIMPEZA]: ${expired.count} agentes zumbis marcados como OFFLINE.`);
+        }
+      } catch (err) {
+        console.error('[ERRO]: Falha na limpeza de zumbis:', err);
+      }
+    }, 60000);
+
   } catch (err) {
     console.error(err);
     process.exit(1);

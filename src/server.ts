@@ -15,6 +15,25 @@ const activeAgents = new Map<string, any>();
 };
 
 /**
+ * Utilitário: Sanitização de HWID
+ */
+const sanitizeHwid = (hwid: string) => hwid.trim().toLowerCase();
+
+/**
+ * Utilitário: Atualização de sinal de vida (Last Seen)
+ */
+async function updateLastSeen(hwid: string) {
+  try {
+    await prisma.asset.update({
+      where: { hwid: sanitizeHwid(hwid) },
+      data: { lastSeen: new Date(), status: 'ONLINE' }
+    });
+  } catch (err) {
+    // Silencioso: Se o asset ainda não existir (antes do handshake), ignora o update
+  }
+}
+
+/**
  * Inicialização do Servidor e Registro de Rotas
  */
 async function startServer() {
@@ -38,26 +57,22 @@ async function startServer() {
   server.post('/api/assets/:hwid/command', async (request, reply) => {
     const { hwid } = request.params as { hwid: string };
     const { action } = request.body as { action: string };
+    const cleanHwid = sanitizeHwid(hwid);
 
-    const socket = activeAgents.get(hwid);
+    const socket = activeAgents.get(cleanHwid);
 
     if (!socket) {
       return reply.status(404).send({ error: "Agente offline ou não encontrado." });
     }
 
-    // Envelopa o comando para o Agente C#
     const commandPacket = JSON.stringify({
       Type: "Command",
-      Payload: {
-        Action: action,
-        CommandId: crypto.randomUUID()
-      }
+      Payload: { Action: action, CommandId: crypto.randomUUID() }
     });
 
     socket.send(commandPacket);
-    console.log(`[COMANDO]: ${action} enviado para o Agente ${hwid.substring(0, 8)}`);
-
-    return { message: "Comando enviado com sucesso." };
+    console.log(`[COMANDO]: ${action} enviado para ${cleanHwid.substring(0, 8)}`);
+    return { message: "Comando enviado." };
   });
 
   // 4. ROTA WS: Ingestão e Controle
@@ -65,44 +80,45 @@ async function startServer() {
     const clientId = req.socket.remoteAddress || 'Unknown';
     let currentHwid: string | null = null;
 
-    console.log(`\n[WS]: Agente Conectado em /agent-hub [${clientId}]`);
-
     socket.on('message', async (data: any) => {
       try {
         const message = JSON.parse(data.toString());
         const { Type, Payload } = message;
 
-        const hwid = Payload?.Hwid || Payload?.hwid;
-        const logHwid = hwid || 'Desconhecido';
+        const rawHwid = Payload?.Hwid || Payload?.hwid;
+        if (!rawHwid) return;
 
-        if (Type === 'Handshake' && hwid) {
-          currentHwid = hwid;
-          activeAgents.set(hwid, socket); // Registra no pool ativo
+        const hwid = sanitizeHwid(rawHwid);
+        currentHwid = hwid;
+
+        // Reset de inatividade: Qualquer mensagem (Handshake, Telemetry, Ping) reseta o LastSeen
+        await updateLastSeen(hwid);
+
+        if (Type === 'Handshake') {
+          activeAgents.set(hwid, socket);
           await handleHandshake(Payload);
         } else if (Type === 'Telemetry') {
           await handleTelemetry(Payload);
+        } else if (Type === 'Ping') {
+          // Heartbeat explícito já tratado pelo updateLastSeen acima
+          console.log(`[HEARTBEAT]: ${hwid.substring(0, 8)}`);
         }
       } catch (err) {
-        console.error('[ERRO]: Falha ao processar mensagem do agente:', err);
+        console.error('[ERRO]: Falha no parser de mensagem:', err);
       }
     });
 
     socket.on('close', async () => {
       if (currentHwid) {
-        activeAgents.delete(currentHwid); // Remove do pool ativo
-        
+        const cleanHwid = sanitizeHwid(currentHwid);
+        activeAgents.delete(cleanHwid);
         try {
           await prisma.asset.update({
-            where: { hwid: currentHwid },
-            data: { 
-              status: 'OFFLINE',
-              lastSeen: new Date()
-            }
+            where: { hwid: cleanHwid },
+            data: { status: 'OFFLINE', lastSeen: new Date() }
           });
-          console.log(`[WS]: Agente ${currentHwid.substring(0, 8)} desconectado e marcado como OFFLINE no BD.`);
-        } catch (err) {
-          console.error(`[ERRO]: Falha ao atualizar status OFFLINE para ${currentHwid}:`, err);
-        }
+          console.log(`[WS]: Agente ${cleanHwid.substring(0, 8)} desconectado formalmente.`);
+        } catch (err) {}
       }
     });
   });
@@ -111,19 +127,34 @@ async function startServer() {
     await server.listen({ port: 5000, host: '0.0.0.0' });
     console.log('🚀 Sentinel API Rodando em http://localhost:5000');
 
-    // TESTE 4: Heartbeat / Zombie Cleaner (Roda a cada 60s)
+    // TESTE 4 & LÓGICA CORRIGIDA: Zombie Cleaner (Roda a cada 60s)
     setInterval(async () => {
-      const timeoutLimit = new Date(Date.now() - 2 * 60 * 1000); // 2 minutos
+      const cutoff = new Date(Date.now() - 4 * 60 * 1000); // 4 minutos de tolerância (UTC)
+      
       try {
+        // Log de Diagnóstico (Apenas Online)
+        const onlineAgents = await prisma.asset.findMany({ 
+          where: { status: 'ONLINE' },
+          select: { hwid: true, lastSeen: true } 
+        });
+
+        if (onlineAgents.length > 0) {
+          console.log(`\n[DIAGNÓSTICO CLEANER]: Cutoff: ${cutoff.toISOString()}`);
+          onlineAgents.forEach(a => {
+            console.log(`   - Agente ${a.hwid.substring(0, 8)} | LastSeen: ${a.lastSeen.toISOString()} | Expira: ${a.lastSeen < cutoff}`);
+          });
+        }
+
         const expired = await prisma.asset.updateMany({
           where: {
             status: 'ONLINE',
-            lastSeen: { lt: timeoutLimit }
+            lastSeen: { lt: cutoff }
           },
           data: { status: 'OFFLINE' }
         });
+
         if (expired.count > 0) {
-          console.log(`[LIMPEZA]: ${expired.count} agentes zumbis marcados como OFFLINE.`);
+          console.log(`[LIMPEZA]: ${expired.count} agentes zumbis removidos.`);
         }
       } catch (err) {
         console.error('[ERRO]: Falha na limpeza de zumbis:', err);
@@ -136,11 +167,8 @@ async function startServer() {
   }
 }
 
-/**
- * Persistência: Handshake
- */
 async function handleHandshake(payload: any) {
-  const hwid = payload.Hwid || payload.hwid;
+  const hwid = sanitizeHwid(payload.Hwid || payload.hwid);
   const hostname = payload.Hostname || payload.hostname;
   const osVersion = payload.OsVersion || payload.osVersion;
   const macAddress = payload.MacAddress || payload.macAddress;
@@ -151,35 +179,19 @@ async function handleHandshake(payload: any) {
   await prisma.asset.upsert({
     where: { hwid },
     update: {
-      hostname,
-      osVersion,
-      macAddress,
-      localIp,
-      cpuModel,
-      installedSoftware,
-      status: 'ONLINE',
-      lastSeen: new Date(),
+      hostname, osVersion, macAddress, localIp, cpuModel, installedSoftware,
+      status: 'ONLINE', lastSeen: new Date(),
     },
     create: {
-      hwid,
-      hostname,
-      osVersion,
-      macAddress,
-      localIp,
-      cpuModel,
-      installedSoftware,
+      hwid, hostname, osVersion, macAddress, localIp, cpuModel, installedSoftware,
       status: 'ONLINE',
     },
   });
-
-  console.log(`[BD]: Handshake Concluído para ${hwid.substring(0, 8)}`);
+  console.log(`[BD]: Handshake/Sync: ${hwid.substring(0, 8)}`);
 }
 
-/**
- * Persistência: Telemetry
- */
 async function handleTelemetry(payload: any) {
-  const hwid = payload.Hwid || payload.hwid;
+  const hwid = sanitizeHwid(payload.Hwid || payload.hwid);
   const cpuUsage = payload.CpuUsagePercentage || payload.cpuUsagePercentage;
   const ramTotal = payload.RamTotalBytes || payload.ramTotalBytes;
   const ramUsed = payload.RamUsedBytes || payload.ramUsedBytes;

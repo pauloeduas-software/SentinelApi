@@ -27,13 +27,15 @@ model Asset {
 }
 
 model Telemetry {
-  id         String   @id @default(uuid()) @db.Uuid
-  assetId    String   @db.Uuid
-  cpuUsage   Float
-  ramTotal   BigInt
-  ramUsed    BigInt
-  disks      Json?
-  timestamp  DateTime @default(now())
+  id           String   @id @default(uuid()) @db.Uuid
+  assetId      String   @db.Uuid
+  cpuUsage     Float
+  ramTotal     BigInt
+  ramUsed      BigInt
+  disks        Json?
+  network      Json?
+  topProcesses Json?
+  timestamp    DateTime @default(now())
   
   // Relacionamento com o Asset
   asset      Asset    @relation(fields: [assetId], references: [id], onDelete: Cascade)

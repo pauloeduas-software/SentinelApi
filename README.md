@@ -1,42 +1,41 @@
-# SentinelApi - O Cérebro e Ingestão (Sentinel v2.0)
+# Sentinel Central API 🌉
+> **Real-time Orchestration Hub & Data Persistence Layer**
 
-A **SentinelApi** é o ponto de convergência de todos os dados do ecossistema Sentinel. É uma API de alta escalabilidade desenvolvida para lidar com conexões WebSocket persistentes e servir dados estruturados de inventário para o Dashboard.
+![Node.js](https://img.shields.io/badge/Node.js-20.x-339933?logo=node.js)
+![Fastify](https://img.shields.io/badge/Fastify-5.x-black?logo=fastify)
+![Prisma](https://img.shields.io/badge/Prisma-ORM-2D3748?logo=prisma)
 
-## 🚀 Funcionalidades Principais
+A **Sentinel API** serve como o sistema nervoso central, unificando a ingestão de dados em tempo real via WebSockets e o gerenciamento administrativo via REST.
 
-### 1. Ingestão WebSocket Bidirecional
-- **Handshake ITAM**: Processa identidades de hardware e listas de software, realizando `upsert` inteligente no banco de dados.
-- **Telemetria Contínua**: Recebe e persiste dados de CPU, RAM e Storage JSON em alta frequência.
-- **Active Pool Management**: Mantém um mapa em memória (`HWID -> WebSocket`) para permitir o envio de comandos instantâneos para os agentes.
+## 📁 Estrutura do Projeto e Fluxo de Arquivos
 
-### 2. Orquestração de Comandos (RMM)
-- **Command Dispatcher**: Rota REST que ponteia ordens de controle (Reboot, Shutdown) para o túnel WebSocket aberto do agente correspondente.
+### `src/`
+*   **`server.ts`**: O coração da API. Configura o servidor Fastify, gerencia o ciclo de vida dos WebSockets, implementa o **Zombie Cleaner** (limpeza de agentes offline) e as rotas de comando.
+*   **`prisma.config.ts`**: Define a configuração global do ORM e a integração com variáveis de ambiente.
 
-### 3. Camada de Persistência Relacional
-- **Modelagem Robusta**: Uso de PostgreSQL para garantir integridade referencial entre Ativos e suas telemetrias.
-- **Suporte JSONB**: Armazenamento flexível de lista de softwares e estruturas de disco.
+### `prisma/`
+*   **`schema.prisma`**: Definição do modelo de dados. Utiliza campos **JSONB** para `network`, `disks` e `topProcesses`, garantindo flexibilidade total para o Agente sem migrações pesadas.
+*   **`migrations/`**: Histórico de alterações estruturais do banco de dados PostgreSQL.
 
-## 🛠️ Stack Tecnológica
-- **Runtime**: Node.js v20+
-- **Linguagem**: TypeScript
-- **Web Framework**: Fastify v5 (Arquitetura assíncrona)
-- **Database**: PostgreSQL
-- **ORM**: Prisma (Segurança de tipos e migrations)
+## 📡 Fluxo de Comunicação
+1.  **Ingestão:** O Agente envia um `TelemetryPacket` via WS.
+2.  **Persistência:** O `server.ts` atualiza o `lastSeen` e salva as métricas brutas no PostgreSQL.
+3.  **Comando:** O Web Dashboard envia um POST para `/api/assets/:hwid/command`. A API localiza o Socket ativo pelo HWID e dispara o comando instantaneamente.
 
-## 📁 Estrutura do Projeto
-- `src/server.ts`: Bootstrap do servidor, registro de plugins e lógica de rotas.
-- `prisma/schema.prisma`: Definição de modelos de dados e relações.
-- `src/types/`: Interfaces compartilhadas para resiliência de chaves (PascalCase/camelCase).
+## 📋 Requisitos
+*   Node.js v22.x ou superior
+*   PostgreSQL v16.x
+*   Bun (Gerenciador de pacotes)
 
-## ⚙️ Como Rodar
-1. **Instalação**: `npm install`
-2. **Banco de Dados**: Configure o `DATABASE_URL` no `.env` e rode `npx prisma migrate dev`.
-3. **Execução**:
-   ```bash
-   npx ts-node src/server.ts
-   ```
+## ⚙️ Configuração Inicial
 
-## 🔒 Segurança e Resiliência
-- **CORS Habilitado**: Configurado para integração segura com o frontend React.
-- **BigInt JSON Hack**: Implementação global para garantir que dados de memória RAM (grandes inteiros) sejam transmitidos sem erros no JSON.
-- **Error Handling**: Blocos try-catch isolados por evento para garantir que um agente malformado não derrube o servidor.
+```bash
+# 1. Instalar dependências
+bun install
+
+# 2. Sincronizar Banco de Dados
+npx prisma db push
+
+# 3. Iniciar a API
+bun src/server.ts
+```
